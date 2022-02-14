@@ -1,0 +1,704 @@
+---
+title: "Preprocessing"
+author: "Youyung Lim"
+date: "25/11/2021"
+output: html_document
+---
+
+***Perhaps write a function for saving the png 
+
+### Preprocessing steps
+0. Load a dataset
+- 5 single cell RNA-seq data : Macparland, Tamburini, Segal, Macparland2 & Aizarani at al.
+- column = cell
+
+1. Data wrangling
+- change Ensembl ID to gene names for Segal dataset
+- Select healthy liver data only
+
+2. Data Exploration
+- check normalization - and only normalize raw count data before integration
+3. Preprocessing - Original
+- Create Seurat object
+- Remove unexpressed cells
+
+4. Preprocessing - Filter1
+remove outliers - 3MAD
+
+5. Preprocessing - Filter2
+remove cell clusters/populations with less than 10 cells
+
+6. Preprocessing - Filter3
+more clean-up
+- 64 cells from Aizarani are removed for not having cluster ID (NAs)
+- "Bcell_Mature B cells" from MacParland2021 locates separated from other B cells. / not clustered well. / 15 cells hence not removed in the preprocessing. / No DEG between this and other B cells ---> removed before integration
+
+7. Normalization & Save all preprocessed datasets as a list (ready for integration)
+
+
+```{r, echo=FALSE}
+library(ggplot2)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(tidyr)
+library(stats)
+
+path <- '/mnt/resu0001/Boonstra/Users/Youkyung/healthyLiver'
+path2 <- '/mnt/resu0001/Boonstra/Users/Youkyung/integrated'
+```
+
+
+### Segal 2019
+
+```{r}
+# Load the data and its meta data from Segal et al.
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE130473
+segal.data <- read.csv(file.path(path,"Segal_GSE130473/GSE130473_Series_count_matrix.csv"), header = T, row.names = 1)
+segal.meta <- read.csv(file.path(path, "Segal_GSE130473/GSE130473_Series_feature_matrix.csv"), header = T)
+```
+
+Data wrangling
+```{r}
+# Select healthy samples only
+segal.meta <- subset(segal.meta, subset = SAMPLE %in% c('Human adult liver 1', 'Human adult liver 2', 'Human adult liver 3'))
+segal.meta$X <- gsub('#', '.', segal.meta$X)
+segal.meta$CELL_ID <- gsub('#', '.', segal.meta$CELL_ID)
+segal.data <- segal.data[segal.meta$CELL_ID]
+```
+
+```{r}
+# Convert Ensembl ID to gene names
+ensembl.ids <- row.names(segal.data) # "ENSG00000000003.14"
+ensembl.ids <- gsub('\\..+$', '', ensembl.ids) # "ENSG00000000003"
+ensembl.ids <- as.data.frame(ensembl.ids)
+
+# Import database 
+library(biomaRt)
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+gene.ids <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id", "hgnc_symbol", "gene_biotype"), values= ensembl.ids, mart= mart)
+```
+
+```{r}
+# Match Ensembl IDs and gene names (hgnc_symbol), make into a separate table
+matches <- merge(ensembl.ids, gene.ids, by.x="ensembl.ids", by.y="ensembl_gene_id", all = T)
+
+# Remove duplicated Ensembl IDs and gene names from the matching matrix
+
+# 3 Ensembl IDs are duplicated, and the same gene_biotype is observed within the duplicates. Let's keep the first one of each duplicate only.
+matches[duplicated(matches$ensembl.ids) == TRUE,]
+matches[matches$ensembl.ids %in% c('ENSG00000230417', 'ENSG00000254876', 'ENSG00000276085'),]
+matches <- matches[duplicated(matches$ensembl.ids) == FALSE,]
+
+# Remove the duplicated gene names as well
+unique(matches[duplicated(matches$hgnc_symbol) == TRUE,]$hgnc_symbol) # 18 unique values, but majority is "" or NA
+matches <- matches[duplicated(matches$hgnc_symbol) == FALSE,] 
+matches <- na.omit(matches) # remove NA
+matches <- matches[matches$hgnc_symbol != "",] # remove ""
+
+# No duplicates left
+matches[duplicated(matches$hgnc_symbol) == TRUE,]$hgnc_symbol
+```
+
+```{r}
+# Assign gene names to the dataset
+segal.data <- subset(segal.data, gsub('\\..+$', '', row.names(segal.data)) %in% matches$ensembl.ids)
+row.names(segal.data) <- matches$hgnc_symbol
+dim(segal.data) # 38565
+head(segal.data)
+```
+
+Data Exploration
+The original data from Segal et al. is the raw count data.
+```{r}
+# Normalization check.
+# 0 = row count matrix, otherwise the original data had been normalized already.
+# Check this before creating Seurat object / turning into a sparse matrix
+sum(segal.data - lapply(segal.data, as.integer))
+
+# Scaling check
+mean(colMeans(segal.data))
+range(as.list(lapply(segal.data, FUN = "range", na.rm=TRUE)))
+
+# Visual check - density plot using colSums (per cell)
+segal.original <-colSums(segal.data)
+plot(density(segal.original))
+```
+
+
+Preprocessing - Original
+```{r}
+# create Seurat object & filter out the genes that were not expressed
+segal.healthy <- CreateSeuratObject(segal.data,  project = "Segal_healthy", min.cells=1, min.features = 1)
+
+# AddMetaData
+segal.healthy <- AddMetaData(segal.healthy, 'Segal', col.name = 'project')
+segal.healthy$sample <- segal.meta$SAMPLE
+segal.healthy$cluster <- segal.meta$FACS
+segal.healthy$percent.mt <- PercentageFeatureSet(segal.healthy, pattern = "^MT-")
+
+# Visual inspection - original data
+VlnPlot(segal.healthy, group.by = 'sample', features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'segal_original.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(segal.healthy, group.by = 'sample', features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("Segal_Original data", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+Preprocessing - Filter1
+```{r}
+# Calculate median absolute deviation (MAD)
+MAD <- mad(segal.healthy$nFeature_RNA)
+deviation <- (segal.healthy$nFeature_RNA - median(segal.healthy$nFeature_RNA)) / MAD
+
+# If deviation of a cell is bigger than 3 or smaller than -3, the cell is an outlier
+segal.healthy$deviation <- deviation
+segal.healthy.filter <- subset(segal.healthy, subset = deviation > -3 & deviation < 3)
+
+segal.healthy # 480 samples
+segal.healthy.filter # 471 samples
+
+# Visual inspection - filtered data 1
+VlnPlot(segal.healthy.filter, group.by = 'sample', features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+ 
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'segal_filter1.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(segal.healthy.filter, group.by = 'sample', features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("Segal_Filtered data 1", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+
+Preprocessing - Filter2
+```{r}
+# No clusters are less than 10 hence nothing gets removed
+table(segal.healthy.filter$cluster)
+```
+
+```{r}
+# check NA
+sum(is.na(segal.healthy.filter@meta.data$cluster))
+```
+
+
+
+### Aizarani 2019
+```{r}
+# Load the data and its metadata from Aizarani et al.
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE124395
+aizarani.data <- readRDS(file.path(path,'Aizarani_GSE124395/GSE124395_Normalhumanliverdata.RData'))
+aizarani.meta <- read.table(file.path(path,'Aizarani_GSE124395/GSE124395_clusterpartition.txt'))
+
+```
+
+ 
+Data wrangling
+```{r}
+# Cluster IDs are only in numbers, not in marker gene names.
+# Had requested the corresponding gene names per original cluster labeling & It decreases it from 39 (numbers) to 10 (names).
+aizarani.meta$cluster <- factor(aizarani.meta$sct.cpart,
+       levels = c('21','33', '24','39','4','7', '11','17','14','30', '9','13','20', '10','29','32', '3','28','1','12','18','5', '34', '22','8','38', '2','25','6','23','31', '15','26','35'),
+       labels =c(rep('Stellate cells',2),  rep('EPCAM+ bile duct cells', 4), rep('Hepatocytes', 4), rep('LSECs', 3), rep('MVECs', 3), rep('NK NKT cells', 6), 'MHC II+ B cells', rep('Resident B cells', 3), rep('Kupffer cells',5), rep('Other endothelial cells',3)))
+```
+
+
+```{r}
+# remove the unlabeled cells
+aizarani.data <- aizarani.data[,colnames(aizarani.data) %in% row.names(aizarani.meta)]
+
+# match the cell names by replacing '_' to '-'
+colnames(aizarani.data) <- gsub('_', '-', colnames(aizarani.data))
+row.names(aizarani.meta) <- gsub('_', '-', row.names(aizarani.meta))
+```
+
+ 
+Data Exploration
+The original data from Aizarani et al. is a normalized matrix.
+```{r}
+# Normalization check.
+sum(aizarani.data - lapply(aizarani.data, as.integer))
+
+# Scaling check
+mean(colMeans(aizarani.data))
+range(as.list(lapply(aizarani.data, FUN = "range", na.rm=TRUE)))
+
+# Visual check - density plot using colSums (per cell)
+aizarani.original <-colSums(aizarani.data)
+plot(density(aizarani.original))
+```
+
+
+Preprocessing - Original
+
+```{r}
+# Create Seurat object
+aizarani.healthy <- CreateSeuratObject(aizarani.data, project = 'Aizarani_healthy',  min.cells=1, min.features = 1)
+
+# Add meta data
+aizarani.healthy <- AddMetaData(aizarani.healthy, 'Aizarani', col.name = 'project')
+aizarani.healthy$cluster <- aizarani.meta$cluster
+aizarani.healthy$"percent.mt" <- PercentageFeatureSet(aizarani.healthy, pattern = "^MT") 
+
+# Visual inspection - original data
+VlnPlot(aizarani.healthy, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'aizarani_original.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(aizarani.healthy, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("Aizarani_Original data", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+Preprocessing - Filter1
+```{r}
+# calculate MAD (median absolute deviation) on nFeatures (the number of detected genes per cell)
+MAD <- mad(aizarani.healthy$nFeature_RNA)
+deviation <- (aizarani.healthy$nFeature_RNA - median(aizarani.healthy$nFeature_RNA)) / MAD
+
+# if the deviation is bigger than 3 or smaller than -3, the cell is an outlier
+aizarani.healthy$deviation <- deviation
+aizarani.healthy.filter <- subset(aizarani.healthy, subset = deviation > -3 & deviation < 3)
+
+aizarani.healthy # 10372 samples
+aizarani.healthy.filter # 10047 samples
+
+# Visual inspection - filtered data 1
+VlnPlot(aizarani.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'aizarani_filter1.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(aizarani.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("Aizarani_Filtered data 1", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+ 
+Preprocessing - Filter2 
+```{r}
+# check number of cells per cluster
+# No cluster to remove!
+table(aizarani.healthy.filter$cluster)
+```
+
+```{r}
+# check NA
+sum(is.na(aizarani.healthy.filter@meta.data$cluster))
+```
+
+Preprocessing - Filter3
+```{r}
+# remove the cells without cluster ID
+aizarani.healthy.filter <- aizarani.healthy.filter[,which(!is.na(aizarani.healthy.filter@meta.data$cluster))] # 9983 samples
+
+aizarani.healthy.filter
+```
+
+```{r}
+VlnPlot(aizarani.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'))
+```
+
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'aizarani_filter3.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(aizarani.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("Aizarani_Filtered data 3", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+ 
+
+### MacParland 2018
+
+```{r}
+# Load the data and its metadata from MacParland et al. (1)
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE115469
+macparland.data <- read.csv(file.path(path,"MacParland_GSE115469/GSE115469_Data.csv"), header=T)
+macparland.meta <- read.csv(file.path(path,"MacParland_GSE115469/GSE115469_CellClusterType.txt"), header=T, sep = "\t")
+```
+
+Data wrangling
+```{r}
+# Make the first column (genes) to the row name.
+row.names(macparland.data) <- macparland.data[,1]
+macparland.data <- macparland.data[,-1]
+```
+
+Data Exploration
+The original data from MacParland et al. (2018) is a normalized matrix, hence will not be normalized before the integration.
+```{r}
+# Normalization check.
+sum(macparland.data - lapply(macparland.data, as.integer))
+
+# Scaling check
+mean(colMeans(macparland.data))
+range(as.list(lapply(macparland.data, FUN = "range", na.rm=TRUE)))
+
+# Visual check - density plot using colSums (per cell)
+macparland.original <-colSums(macparland.data)
+plot(density(macparland.original))
+
+```
+
+ 
+Preprocessing - Original
+```{r}
+# Create Seurat object & filter out the genes that were not expressed
+macparland.healthy <- CreateSeuratObject(counts= macparland.data, project = "MacParland2018_healthy", min.cells = 1, min.features = 1)
+
+# Add meta data
+macparland.healthy <- AddMetaData(macparland.healthy, 'MacParland2018', col.name = 'project')
+macparland.healthy$percent.mt <- PercentageFeatureSet(macparland.healthy, pattern = "^MT-")
+macparland.healthy$cluster <- macparland.meta$CellType
+macparland.healthy$sample <- macparland.meta$Sample
+
+# Visual inspection - original data
+VlnPlot(macparland.healthy, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'macparland2018_original.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(macparland.healthy, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("MacParland2018_Original data", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+Preprocessing - Filter1
+```{r}
+# calculate MAD (median absolute deviation) on nFeatures (the number of detected genes per cell)
+MAD <- mad(macparland.healthy$nFeature_RNA)
+deviation <- (macparland.healthy$nFeature_RNA - median(macparland.healthy$nFeature_RNA)) / MAD
+
+# if the deviation is bigger than 3 or smaller than -3, the cell is an outlier
+macparland.healthy$deviation <- deviation
+macparland.healthy.filter <- subset(macparland.healthy, subset = deviation > -3 & deviation < 3)
+
+macparland.healthy # 8444 samples
+macparland.healthy.filter # 8145 samples
+
+# Visual inspection - filtered data 1
+VlnPlot(macparland.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+ 
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'macparland2018_filter1.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(macparland.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("MacParland2018_Filtered data 1", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+Preprocessing - Filter2
+```{r}
+# check number of cells per cluster
+# No cluster has less than 10 cells
+table(macparland.healthy.filter$cluster)
+```
+
+```{r}
+# check NA
+sum(is.na(macparland.healthy.filter@meta.data$cluster))
+```
+
+ 
+
+### MacParland 2021
+```{r}
+# Load the data and its metadata from Macparland et al. (2)
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE185477
+# https://pubmed.ncbi.nlm.nih.gov/34792289/
+# https://www.dropbox.com/sh/sso15ehqmrrh6mk/AACKHOsSlZW0_Zy9cbCkOmMfa?dl=0
+macparland2.data <- readRDS(file.path(path,'MacParland2_GSE185477/Integrated_with_Subannotations.rds')) # already a Seurat object
+```
+
+Data wrangling
+```{r}
+# Select single cell data only (exclude ncRNA-seq data)
+macparland2.data <- macparland2.data[,macparland2.data$assay_type == "single_cell"]
+
+macparland2.meta <- macparland2.data@meta.data
+macparland2.data <- as.data.frame(macparland2.data@assays$RNA@data)
+```
+
+Data Exploration
+The original data from MacParland et al. (2021) is a normalized matrix, hence will not be normalized before the integration.
+```{r}
+# Normalization check.
+sum(macparland2.data - lapply(macparland2.data, as.integer))
+
+# Scaling check
+mean(colMeans(macparland2.data))
+range(as.list(lapply(macparland2.data, FUN = "range", na.rm=TRUE)))
+
+# Visual check - density plot using colSums (per cell)
+macparland2.original <-colSums(macparland2.data)
+plot(density(macparland2.original))
+```
+
+
+Preprocessing - Original
+```{r}
+# Create Seurat object & filter out the genes that were not expressed
+macparland2.healthy <- CreateSeuratObject(counts= macparland2.data, project = "Macparland2021_healthy", min.cells = 1, min.features = 1)
+
+# Add metadata
+macparland2.healthy <- AddMetaData(macparland2.healthy, 'MacParland2021', col.name = 'project')
+macparland2.healthy[["percent.mt"]] <- PercentageFeatureSet(macparland2.healthy, pattern = "^MT-")
+macparland2.healthy$sample <- macparland2.meta$donor
+macparland2.healthy$cluster <- macparland2.meta$sub_annotation # The deepest annotation '$sub_annotation' is chosen for further analysis
+
+# Visual inspection - original data
+VlnPlot(macparland2.healthy, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'macparland2021_original.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(macparland2.healthy, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("MacParland2021_Original data", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+Preprocessing - Filter1
+```{r}
+# calculate MAD (median absolute deviation) on nFeatures (the number of detected genes per cell)
+MAD <- mad(macparland2.healthy$nFeature_RNA)
+deviation <- (macparland2.healthy$nFeature_RNA - median(macparland2.healthy$nFeature_RNA)) / MAD
+
+# if the deviation is bigger than 3 or smaller than -3, the cell is an outlier
+macparland2.healthy$deviation <- deviation
+macparland2.healthy.filter <- subset(macparland2.healthy, subset = deviation > -3 & deviation < 3)
+
+macparland2.healthy # 29432 samples
+macparland2.healthy.filter # 25690 samples
+
+# Visual inspection - filtered data 1
+VlnPlot(macparland2.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'macparland2021_filter1.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(macparland2.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("MacParland2021_Filtered data 1", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+Preprocessing - Filter2
+```{r}
+# check number of cells per cluster
+# 6 clusters have less than 10 cells (hence keeping Chol_hepatocyte progenitors 2 with 10 cells)
+table(macparland2.healthy.filter$cluster)
+```
+
+```{r}
+# remove the cluster with less than 10 cell populations & Doublet/Contamination
+
+'%notin%' <- Negate('%in%')
+macparland2.healthy.filter <- subset(macparland2.healthy.filter, subset = cluster %notin% c('Bcell_Plasma cells', 'Stellate_HSC3', 'Stellate_HSC4', 'Stellate_HSC5', 'Stellate_HSC6', 'Stellate_HSC7', 'Doublet/Contamination'))
+
+macparland2.healthy.filter # 25657 samples
+
+# Visual inspection - filtered data 2
+VlnPlot(macparland2.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'macparland2021_filter2.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(macparland2.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("MacParland2021_Filtered data 2", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+Preprocessing - Filter3
+```{r}
+# remove the questionable 'Bcell_Mature B cells'
+macparland2.healthy.filter <- subset(macparland2.healthy.filter, subset = cluster %notin% c('Bcell_Mature B cells'))
+
+macparland2.healthy.filter # 10432 features across 20773 samples
+
+# Visual inspection - filtered data 3
+VlnPlot(macparland2.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+```{r}
+# Check the number of cluster labels
+# No change
+table(macparland2.healthy.filter$cluster)
+```
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'macparland2021_filter3.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(macparland2.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("MacParland2021_Filtered data 3", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+
+```{r}
+# check NA
+sum(is.na(macparland2.healthy.filter@meta.data$cluster))
+```
+
+ 
+### Tamburini 2019
+```{r}
+# Load the data and its metadata from Tamburini et al.
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE129933
+tamburini.data <- read.table(file.path(path,"Tamburini_GSE129933/GSE129933_count_matrix.tsv"), header=T)
+tamburini.meta <- read.table(file.path(path,"Tamburini_GSE129933/GSE129933_cell_metadata.tsv"), header=T)
+```
+
+Data wrangling
+```{r}
+# Make the first column (genes) to the row name.
+row.names(tamburini.data) <- tamburini.data[,1]
+tamburini.data <- tamburini.data[,-1]
+
+# Select healthy livers
+tamburini.meta <- subset(tamburini.meta, tamburini.meta$sample %in% c('Non-Diseased1', 'Non-Diseased2'))
+tamburini.data <- tamburini.data[tamburini.meta$cell]
+```
+
+Data Exploration
+The original data from Tamburini et al. is a raw count matrix, hence need to be normalized before the integration.
+
+```{r}
+# Normalization check.
+sum(tamburini.data - lapply(tamburini.data, as.integer))
+
+# Scaling check
+mean(colMeans(tamburini.data))
+range(as.list(lapply(tamburini.data, FUN = "range", na.rm=TRUE)))
+
+# Visual check - density plot using colSums (per cell)
+tamburini.original <-colSums(tamburini.data)
+plot(density(tamburini.original))
+```
+
+Preprocessing - Original
+```{r}
+# Create Seurat object & filter out the genes that were not expressed
+tamburini.healthy <- CreateSeuratObject(tamburini.data, project = 'Tamburini_healthy', min.cells=1, min.features = 1)
+
+# Add meta data
+tamburini.healthy <- AddMetaData(tamburini.healthy, 'Tamburini', col.name = 'project')
+tamburini.healthy$sample <- tamburini.meta$sample
+tamburini.healthy$cluster <- tamburini.meta$cluster
+tamburini.healthy$percent.mt <- tamburini.meta$percent.mito
+
+# Visual inspection - original data
+VlnPlot(tamburini.healthy, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'tamburini_original.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(tamburini.healthy, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("Tamburini_Original data", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+Preprocessing - Filter1
+```{r}
+# calculate MAD (median absolute deviation) on nFeatures (the number of detected genes per cell)
+MAD <- mad(tamburini.healthy$nFeature_RNA)
+deviation <- (tamburini.healthy$nFeature_RNA - median(tamburini.healthy$nFeature_RNA)) / MAD
+
+# if the deviation is bigger than 3 or smaller than -3, the cell is an outlier
+tamburini.healthy$deviation <- deviation
+tamburini.healthy.filter <- subset(tamburini.healthy, subset = deviation > -3 & deviation < 3)
+
+tamburini.healthy # 544 samples
+tamburini.healthy.filter # 469 samples
+
+# Visual inspection - filtered data 1
+VlnPlot(tamburini.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'tamburini_filter1.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(tamburini.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("Tamburini_Filtered data 1", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+ 
+Preprocessing - Filter2
+```{r}
+# check number of cells per cluster
+table(tamburini.healthy.filter$cluster)
+```
+
+
+```{r}
+# remove the cluster with less than 10 cell populations
+tamburini.healthy.filter <- subset(tamburini.healthy.filter, subset = cluster %notin% c('Hepatocytes', 'Fibroblasts'))
+table(tamburini.healthy.filter$cluster)
+tamburini.healthy.filter # 455 samples
+ 
+# Visual inspection - filtered data 2
+VlnPlot(tamburini.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3)
+```
+
+
+```{r}
+# Save the plot as png file
+png(filename = file.path(path,'tamburini_filter2.png'), width = 1200, units = 'px')
+plotlist <- VlnPlot(tamburini.healthy.filter, features = c("nFeature_RNA", "nCount_RNA", 'percent.mt'), ncol = 3, combine = FALSE)
+p1 <- cowplot::plot_grid(plotlist = plotlist, ncol = 3)
+title <- cowplot::ggdraw() + cowplot::draw_label("Tamburini_Filtered data 2", fontface = 'bold', size = 18)
+cowplot::plot_grid(title, p1, ncol = 1, rel_heights = c(0.2, 1))
+```
+
+
+```{r}
+# check NA
+sum(is.na(tamburini.healthy.filter@meta.data$cluster))
+```
+
+
+### Normalization & Save the preprocessed datasets in a list
+```{r}
+# Normalize the row count matrix
+tamburini.healthy.filter <- NormalizeData(tamburini.healthy.filter)
+segal.healthy.filter <- NormalizeData(segal.healthy.filter)
+
+# Put preprocessed datasets in one list
+liver.list0 <- c(macparland.healthy.filter, macparland2.healthy.filter, tamburini.healthy.filter, aizarani.healthy.filter, segal.healthy.filter)
+
+# Save the list as *.rds for the next step (integration)
+saveRDS(liver.list0, file = file.path(path2,'5/preprocessed_datasets.rds'))
+```
+

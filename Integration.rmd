@@ -1,0 +1,239 @@
+---
+title: "Integration"
+author: "Youyung Lim"
+date: "22/12/2021"
+output: html_document
+---
+
+### Integration - Seurat Standard Workflow
+https://satijalab.org/seurat/archive/v3.0/integration.html
+
+Datasets are log-normalized, and the features that are repeatedly variable across datasets (anchors) are identified between all pairs (i.e. 10 datasets = 45 pairwise comparisons). While equal weights are given to the datasets, it is computationally intensive compared to the reference-based workflow which reduces the number of comparison by specifying one or more of the datasets as the ‘reference’ and the rest as queries. 
+
+Different options* did not give different results in the integrated UMAP. Hence we stick to the standard workflow.
+*
+Log-normalization                   / Standard / nfeature = 1000, 2000, 3000
+Log-normalization / Reciprocal PCA / Standard / nfeature = 1000, 2000, 3000
+Log-normalization / Reciprocal PCA / Reference-based / nfeature = 2000
+
+```{r, echo=FALSE}
+library(ggplot2)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(tidyr)
+library(stats)
+
+path <- '/mnt/resu0001/Boonstra/Users/Youkyung/healthyLiver'
+path2 <- '/mnt/resu0001/Boonstra/Users/Youkyung/integrated'
+```
+
+Load the preprocessed datasets which is saved in a list
+```{r}
+liver.list0 <- readRDS(file = file.path(path2,'5/preprocessed_datasets.rds'))
+```
+
+### Integration
+```{r}
+liver.list <- lapply(X = liver.list0, FUN = function(x) {
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+})
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = liver.list, nfeatures = 2000)
+liver.anchors <- FindIntegrationAnchors(object.list = liver.list, anchor.features = features)
+
+# # Reciprocal PCA
+# liver.list <- lapply(X = liver.list, FUN = function(x) {
+#     x <- ScaleData(x, features = features, verbose = FALSE)
+#     x <- RunPCA(x, features = features, verbose = FALSE)
+# })
+#
+# liver.anchors <- FindIntegrationAnchors(object.list = liver.list, anchor.features = features, reduction = "rpca")
+```
+
+```{r}
+# Create an 'integrated' data assay
+liver.integrated <- IntegrateData(anchorset = liver.anchors)
+DefaultAssay(liver.integrated) <- "integrated"
+```
+
+
+### Save the datasets as scHPL input format
+Transponse and save normalized data '@data' as data.csv
+Save cluster labels as labels.csv
+
+```{r}
+# Select 
+macpa1 <- liver.integrated@meta.data$project == 'MacParland2018'
+macpa2 <- liver.integrated@meta.data$project == 'MacParland2021'
+tambu <- liver.integrated@meta.data$project == 'Tamburini'
+aizar <- liver.integrated@meta.data$project == 'Aizarani'
+segal <- liver.integrated@meta.data$project == 'Segal'
+
+macparland1_label <- liver.integrated@meta.data$cluster[macpa1]
+macparland1_integrated <- t(as.data.frame(liver.integrated@assays$integrated@data[,macpa1]))
+macparland2_label <- liver.integrated@meta.data$cluster[macpa2]
+macparland2_integrated <- t(as.data.frame(liver.integrated@assays$integrated@data[,macpa2]))
+tamburini_label <- liver.integrated@meta.data$cluster[tambu]
+tamburini_integrated <- t(as.data.frame(liver.integrated@assays$integrated@data[,tambu]))
+aizarani_label <- liver.integrated@meta.data$cluster[aizar]
+aizarani_integrated <- t(as.data.frame(liver.integrated@assays$integrated@data[,aizar]))
+segal_label <- liver.integrated@meta.data$cluster[segal]
+segal_integrated <- t(as.data.frame(liver.integrated@assays$integrated@data[,segal]))
+```
+
+
+```{r}
+write.csv(macparland1_integrated, file = file.path(path2,'5/macparland2018_data.csv'), row.names = TRUE)
+write.csv(macparland1_label, file = file.path(path2,'5/macparland2018_label.csv'), row.names = FALSE)
+write.csv(macparland2_integrated, file = file.path(path2,'5/macparland2021_data.csv'), row.names = TRUE)
+write.csv(macparland2_label, file = file.path(path2,'5/macparland2021_label.csv'), row.names = FALSE)
+write.csv(tamburini_integrated, file = file.path(path2,'5/tamburini_data.csv'), row.names = TRUE)
+write.csv(tamburini_label, file = file.path(path2,'5/tamburini_label.csv'), row.names = FALSE)
+write.csv(aizarani_integrated, file = file.path(path2,'5/aizarani_data.csv'), row.names = TRUE)
+write.csv(aizarani_label, file = file.path(path2,'5/aizarani_label.csv'), row.names = FALSE)
+write.csv(segal_integrated, file = file.path(path2,'5/segal_data.csv'), row.names = TRUE)
+write.csv(segal_label, file = file.path(path2,'5/segal_label.csv'), row.names = FALSE)
+```
+
+
+```{r}
+# Save the integrated dataset with nfeature=2000
+saveRDS(liver.integrated, file = file.path(path2,'5/integrated_2000.rds'))
+```
+
+ 
+
+### Integrated Analysis
+Decide nPC using elbow plot and variance explained 
+```{r}
+# Elbowplot
+liver.integrated <- ScaleData(liver.integrated, verbose = FALSE)
+liver.integrated <- RunPCA(liver.integrated, npcs = 30, verbose = FALSE)
+ElbowPlot(liver.integrated, ndims = 30)
+png(filename = file.path(path2,'5/elbow.png'), width = 800, units = 'px')
+```
+
+```{r}
+# Variance Explained (total sum of squares)
+# ssqtotal = sum(X1*X1) where X1 is a value substracted column means
+# SSQ = variance explained = 100* (1-sum((X1-Xest)^2)/ssqtotal)
+
+Xm <- liver.integrated@assays$integrated@scale.data
+total_variance <- sum(matrixStats::rowVars(Xm)) 
+eigenValues <- (liver.integrated@reductions$pca@stdev)^2
+varExplained <- 100 * (eigenValues / total_variance)
+
+npc = 30
+ssqtot <- 0 * (1:npc)
+for (i in 1:npc){
+  ssqtot[i] <- sum(varExplained[1:i])
+}
+
+write.csv(data.frame(npc=c(1:npc), ssq=varExplained, ssqtot=ssqtot), file = file.path(path2,'5/VarExplained3.csv'))
+```
+
+
+Generate UMAP plots (nPC = 15)
+```{r}
+liver.integrated <- ScaleData(liver.integrated, verbose = FALSE)
+liver.integrated <- RunPCA(liver.integrated, npcs = 15, verbose = FALSE)
+liver.integrated <- RunUMAP(liver.integrated, reduction = 'pca', dims = 1:15)
+# liver.integrated <- RunTSNE(liver.integrated15, reduction = 'pca', dims = 1:15)
+# liver.integrated <- FindNeighbors(liver.integrated, reduction = 'pca', dims = 1:15)
+```
+
+UMAP with colors of each dataset per a metadata (percent.mt, project, cluster, sample). 
+No noticeable bias has been found in the integrated dataset.
+```{r}
+# UMAP with colors of each dataset per a metadata
+DimPlot(liver.integrated, reduction = "umap", group.by = 'percent.mt') + NoLegend()
+DimPlot(liver.integrated, reduction = "umap", group.by = 'project', label = TRUE, repel = TRUE)
+DimPlot(liver.integrated, reduction = "umap", group.by = 'cluster', label = TRUE, repel = TRUE) + NoLegend()
+DimPlot(liver.integrated, reduction = "umap", group.by = 'sample', label = TRUE, repel = TRUE) + NoLegend()
+```
+
+```{r}
+# Save umap_project
+p1 <- DimPlot(liver.integrated, reduction = "umap", group.by = 'project', label = FALSE, repel = TRUE, cols = c("#E16A86", "#909800", "#00AD9A", '#619CFF', '#9183E6'))
+p1$data$project <- factor(x = p1$data$project, levels = c('MacParland2018', 'MacParland2021', 'Tamburini', 'Aizarani', 'Segal'))
+png(filename = file.path(path2,'5/umap_project.png'), width = 800, units = 'px')
+p1
+```
+
+To take a better look at the 'umap_project.png' figure, we will split this into five.
+UMAP of each dataset with its labels - MacParland 2018
+```{r}
+# Get the cells for each dataset (per project)
+Idents(liver.integrated) <- liver.integrated$project
+MacParland2018 <- WhichCells(liver.integrated, idents = "MacParland2018")
+MacParland2021 <- WhichCells(liver.integrated, idents = "MacParland2021")
+Tamburini <- WhichCells(liver.integrated, idents = "Tamburini")
+Aizarani <- WhichCells(liver.integrated, idents = "Aizarani")
+Segal <- WhichCells(liver.integrated, idents = "Segal")
+
+# Remove original cluster information, and add back the cluster information from only one of the datasets
+liver.integrated1 <- liver.integrated
+liver.integrated1$cluster <- NA
+liver.integrated1$cluster <- liver.integrated[,liver.integrated$project =="MacParland2018"]$cluster
+
+# Cells with NA in $cluster will be shown in grey, and the cells from the one dataset will be highlighted.
+png(filename = file.path(path2,'5/umap_macparland2018.png'), width = 800, units = 'px')
+DimPlot(liver.integrated1, label = T, repel = T, group.by = 'cluster', label.size = 4, reduction = "umap", cells.highlight= MacParland2018, cols.highlight = "#E16A86", cols= "grey") + NoLegend()
+dev.off()
+```
+
+UMAP of each dataset with its labels - MacParland 2021
+```{r}
+liver.integrated1$cluster <- NA
+liver.integrated1$cluster <- liver.integrated[,liver.integrated$project =="MacParland2021"]$cluster
+png(filename = file.path(path2,'5/umap_macparland2021.png'), width = 800, units = 'px')
+DimPlot(liver.integrated1, label = T, repel = T, group.by = 'cluster', label.size = 4, reduction = "umap", cells.highlight= MacParland2021, cols.highlight = "#909800", cols= "grey")+ NoLegend()
+dev.off()
+```
+
+UMAP of each dataset with its labels - Tamburini
+```{r}
+liver.integrated1$cluster <- NA
+liver.integrated1$cluster <- liver.integrated[,liver.integrated$project =="Tamburini"]$cluster
+png(filename = file.path(path2,'5/umap_tamburini.png'), width = 800, units = 'px')
+DimPlot(liver.integrated1, label = T, repel = T, group.by = 'cluster', label.size = 5, reduction = "umap", cells.highlight= Tamburini, cols.highlight = "#00AD9A", cols= "grey")+ NoLegend()
+dev.off()
+```
+
+UMAP of each dataset with its labels - Aizarani
+```{r}
+liver.integrated1$cluster <- NA
+liver.integrated1$cluster <- liver.integrated[,liver.integrated$project =="Aizarani"]$cluster
+png(filename = file.path(path2,'5/umap_aizarani.png'), width = 800, units = 'px')
+DimPlot(liver.integrated1, label = T, repel = T, group.by = 'cluster', label.size = 5, reduction = "umap", cells.highlight= Aizarani, cols.highlight = "#619CFF", cols= "grey")+ NoLegend()  
+dev.off()
+```
+
+UMAP of each dataset with its labels - Segal
+```{r}
+liver.integrated1$cluster <- NA
+liver.integrated1$cluster <- liver.integrated[,liver.integrated$project =="Segal"]$cluster
+png(filename = file.path(path2,'5/umap_segal.png'), width = 800, units = 'px')
+DimPlot(liver.integrated1, label = T, repel = T, group.by = 'cluster', label.size = 5, reduction = "umap", cells.highlight= Segal, cols.highlight ="#9183E6", cols= "grey")+ NoLegend()
+dev.off()
+```
+
+
+Checking B cells after removing a cluster 'Bcell_Mature B cells'. It has been removed due to the following reasons.
+• The cluster has mere 15 cells which is only slightly above the threshold of removing a cluster with < 9 cells.
+• It is not properly clustered / scattered.
+• It could not be integrated well with other B cell clusters.
+```{r}
+# B cell clusters after removing "Bcell_Mature B cells" from MacParland2021
+bcells <- colnames(liver.integrated[,liver.integrated$cluster %in% c("Mature_B_Cells", "Plasma_Cells",  "Lymph_Mature B cells", "Lymph_Plasma B cells", "Resident B cells", "MHC II+ B cells")])
+
+liver.integrated1 <- liver.integrated
+liver.integrated1$cluster <- NA
+liver.integrated1$cluster <- liver.integrated[,liver.integrated$cluster %in% c("Mature_B_Cells", "Plasma_Cells", "Lymph_Mature B cells", "Lymph_Plasma B cells", "Resident B cells", "MHC II+ B cells")]$cluster
+
+png(filename = file.path(path2,'5/umap_bcells.png'), width = 800, units = 'px')
+DimPlot(liver.integrated1, label = T, repel = T, group.by = 'cluster', label.size = 4, reduction = "umap", cells.highlight = bcells, cols.highlight ="#FFCC00", cols= "grey") + NoLegend() + ggtitle("B cell clusters")
+dev.off()
+```
