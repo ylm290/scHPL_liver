@@ -4,7 +4,7 @@ Title: Optimizing cell type annotation based on single cell transcriptomes of he
 Author: Youkyung Lim
 Affiliation: MSc Bioinformatics and Systems Biology, Vrije Universiteit Amsterdam
 Date: 10/02/2022
-Usage: $python3 scHPL_liver_5datasets.py [RESOLUTION: 'high' or 'low'] [FLAT_CLASSIFIER: 'svm' or 'svm_occ']
+Usage: $python3 main.py [RESOLUTION: 'high' or 'low'] [FLAT_CLASSIFIER: 'svm' or 'svm_occ']
 """
 
 #!/usr/bin/python3
@@ -15,7 +15,7 @@ import time as tm
 from scHPL import train, predict, update, progressive_learning, utils, evaluate
 import seaborn as sns
 import matplotlib.pyplot as plt
-from scHPL_liver.python3code.functions import ReadDatasets, SortbyResolution, UniqueLabels, ParseDataTrain, TrainClassifier, SaveClassifier, EvaluateTree
+from scHPL_liver.Python.scHPL_liver_5datasets import ReadDatasets, SortbyResolution, UniqueLabels, ParseDataTrain, TrainClassifier, SaveClassifier, EvaluateTree
 
 
 PATH_INPUT = 'integrated_data/5/'
