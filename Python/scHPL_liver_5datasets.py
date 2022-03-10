@@ -4,7 +4,7 @@ Title: Optimizing cell type annotation based on single cell transcriptomes of he
 Author: Youkyung Lim
 Affiliation: MSc Bioinformatics and Systems Biology, Vrije Universiteit Amsterdam
 Date: 10/02/2022
-Usage: $python3 scHPL_liver_5datasets.py [RESOLUTION: 'high' or 'low'] [FLAT_CLASSIFIER: 'svm' or 'svm_occ']
+Usage: $python3 main.py [RESOLUTION: 'high' or 'low'] [FLAT_CLASSIFIER: 'svm' or 'svm_occ']
 """
 
 #!/usr/bin/python3
