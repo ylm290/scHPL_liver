@@ -72,6 +72,25 @@ def SortbyResolution(datasets, RESOLUTION):
     else:
         print("Usage: $python3 scHPL_liver_5datasets.py [RESOLUTION: 'high' or 'low'] [FLAT_CLASSIFIER: 'svm' or 'svm_occ']")
 
+def UniqueLabels(data_train):
+    # if identical labels exist in the training data, change the later one to have '_' at the end?
+    # put all unique labels in one
+    lst_labels = [x[1].unique() for x in data_train]
+    # compare to the string with the earlier index
+    lst_original = []
+    lst_unique = []
+    for idx, x in enumerate(lst_labels): # i = a list of unique labels per dataset
+        for y in x:
+            lst_original.append(y)
+            if y not in lst_unique:
+                lst_unique.append(y)
+            else:
+                # if they are identical (or already in the unique list), add '_' to the latter one
+                y1 = y + '_'
+                lst_unique.append(y1)
+                data_train[idx][1].replace(y, y1)
+    return data_train
+
 def ParseDataTrain(data_train):
     # Put the ordered training datasets in a list, and their labels in another list
     data = []
@@ -81,7 +100,6 @@ def ParseDataTrain(data_train):
         labels.append(ele[1])
     current = labels[0][0] + ' : ' + labels[1][0] + ' : ' + labels[2][0] + ' : ' + labels[3][0] + '\n\n'
     return data, labels, current
-
 
 def TrainClassifier(data, labels, FLAT_CLASSIFIER):
     # Train a hierarchical classifier according to the recommended setting
