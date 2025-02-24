@@ -1,5 +1,5 @@
-# MSc Major Research Project
-Improving cell type annotation of healthy liver single cell transcriptomes using hierarchical progressive learning method
+## MSc Major Research Project
+**Improving cell type annotation of healthy liver single cell transcriptomes using hierarchical progressive learning method**
 
 *Abstract* \
 Cell type annotation in single-cell RNA sequencing (scRNA-seq) studies have been limited since the clustering of cell populations is often manually done and not consistent across studies. Having such variation and inherent subjectivity hinders establishing a collective knowledge of the field. Immunological events in the healthy human liver, in the context of the difference between chronic hepatitis B patients and the acute resolvers, appear particularly important. 
